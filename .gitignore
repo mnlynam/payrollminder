@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Node (if you ever add local tooling)
+node_modules/
+
+# clasp credentials (created by `clasp login`, lives in home dir,
+# but just in case it ends up here)
+.clasprc.json
