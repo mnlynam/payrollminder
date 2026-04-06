@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# clasp project config (contains Script ID)
+.clasp.json
+
 # Node (if you ever add local tooling)
 node_modules/
 
