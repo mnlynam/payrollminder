@@ -3,6 +3,7 @@ README.md
 SETUP.md
 GUIDE.md
 LICENSE
+_config.yml
 .git/**
 .gitignore
 .github/**
