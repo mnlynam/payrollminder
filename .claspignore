@@ -1,8 +1,10 @@
 # Don't push these to Google Apps Script
 README.md
 SETUP.md
+GUIDE.md
 LICENSE
 .git/**
 .gitignore
 .github/**
 node_modules/**
+*.cmd
