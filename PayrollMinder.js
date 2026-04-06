@@ -1,7 +1,7 @@
 /** 
  * PayrollMinder
  * 
- * @version 4.0
+ * @version 4.1
  * @author Matthew Lynam
  * @modified 2026-04-01
  * 
@@ -17,22 +17,21 @@
  * @see {@link https://api.slack.com/} Slack API Documentation
  * 
  * @config The 'Script Properties' in the Apps Script editor must contain:
- * @property {string} SLACK_BOT_TOKEN       - The 'xoxb-' token for the Slack App.
- * @property {string} SLACK_ADMIN_USER_ID   - Slack member ID of the script admin.
- * @property {string} ADMIN_EMAIL           - Email address for critical error notifications.
- * @property {string} SLACK_ID_MIKE         - Slack member ID for Mike.
- * @property {string} SLACK_ID_JANICE       - Slack member ID for Janice.
- * @property {string} GUIDE_DOC_URL         - URL to the public-facing guide document.
- * 
- * @copyright 2025 The Music Place
- * @license Proprietary
+ * @property {string} SLACK_BOT_TOKEN          - The 'xoxb-' token for the Slack App.
+ * @property {string} SLACK_CHANNEL            - The Slack channel for reminders (e.g., '#accounting').
+ * @property {string} SLACK_ADMIN_USER_ID      - Slack member ID of the script admin.
+ * @property {string} ADMIN_EMAIL              - Email address for critical error notifications.
+ * @property {string} SLACK_ID_USER_A          - Slack member ID: tagged for worksheet reminders and check number requests.
+ * @property {string} SLACK_ID_USER_B          - Slack member ID: tagged for check number requests.
+ * @property {string} WORKSHEET_REMINDER_MSG   - Template for the worksheet reminder. Use {priorMonthName} as a placeholder.
+ * @property {string} CHECK_NUMBERS_MSG        - Message text for the check number request.
+ * @property {string} GUIDE_DOC_URL            - (Optional) URL to the public-facing guide document.
  */
 
 // =========================================================================
 // CONFIGURATION
 // =========================================================================
 const TIME_ZONE = "America/Los_Angeles";
-const SLACK_CHANNEL = "#accounting";
 
 /**
  * Reminder schedule — listed in chronological order (earliest first).
@@ -44,9 +43,9 @@ const SLACK_CHANNEL = "#accounting";
  * To add, remove, or reorder reminders, just edit this array.
  */
 const REMINDER_SCHEDULE = [
-  { label: "Heads Up",       bankingDaysBeforePay: 4, emoji: "📋" },
-  { label: "Reminder",       bankingDaysBeforePay: 3, emoji: "📢" },
-  { label: "Submission Due", bankingDaysBeforePay: 2, emoji: "🚨", isSubmissionDay: true },
+  { label: "Heads Up",       bankingDaysBeforePay: 4 },
+  { label: "Reminder",       bankingDaysBeforePay: 3 },
+  { label: "Submission Due", bankingDaysBeforePay: 2, isSubmissionDay: true },
 ];
 
 // Derived: the submission deadline (banking days before pay date)
@@ -74,8 +73,8 @@ const PAY_PERIOD_CONFIG = [
     specialReminders: [
       {
         leadDays: 7,
-        propertyForMention: 'SLACK_ID_MIKE',
-        message: `REMINDER: Please generate the blank teacher payroll worksheets for *{priorMonthName}*.`
+        propertyForMention: 'SLACK_ID_USER_A',
+        messageProperty: 'WORKSHEET_REMINDER_MSG'
       }
     ]
   },
@@ -103,7 +102,16 @@ function logEvent(message) {
 function getScriptConfiguration() {
   const properties = PropertiesService.getScriptProperties();
 
-  const required = ['SLACK_BOT_TOKEN', 'SLACK_ADMIN_USER_ID', 'ADMIN_EMAIL', 'SLACK_ID_MIKE', 'SLACK_ID_JANICE'];
+  const required = [
+    'SLACK_BOT_TOKEN',
+    'SLACK_CHANNEL',
+    'SLACK_ADMIN_USER_ID',
+    'ADMIN_EMAIL',
+    'SLACK_ID_USER_A',
+    'SLACK_ID_USER_B',
+    'WORKSHEET_REMINDER_MSG',
+    'CHECK_NUMBERS_MSG'
+  ];
   const missing = required.filter(key => !properties.getProperty(key));
   if (missing.length) {
     throw new Error(`CRITICAL: Missing required script properties: ${missing.join(', ')}`);
@@ -111,12 +119,17 @@ function getScriptConfiguration() {
 
   const config = {
     slackBotToken:  properties.getProperty('SLACK_BOT_TOKEN'),
+    slackChannel:   properties.getProperty('SLACK_CHANNEL'),
     adminUserId:    properties.getProperty('SLACK_ADMIN_USER_ID'),
     adminEmail:     properties.getProperty('ADMIN_EMAIL'),
     guideDocUrl:    properties.getProperty('GUIDE_DOC_URL'),
+    checkNumbersMsg: properties.getProperty('CHECK_NUMBERS_MSG'),
+    messages: {
+      WORKSHEET_REMINDER_MSG: properties.getProperty('WORKSHEET_REMINDER_MSG')
+    },
     userMentions: {
-      SLACK_ID_MIKE:   `<@${properties.getProperty('SLACK_ID_MIKE')}>`,
-      SLACK_ID_JANICE: `<@${properties.getProperty('SLACK_ID_JANICE')}>`
+      SLACK_ID_USER_A: `<@${properties.getProperty('SLACK_ID_USER_A')}>`,
+      SLACK_ID_USER_B: `<@${properties.getProperty('SLACK_ID_USER_B')}>`
     },
     rawUserIds: {
       SLACK_ADMIN_USER_ID: properties.getProperty('SLACK_ADMIN_USER_ID')
@@ -127,7 +140,7 @@ function getScriptConfiguration() {
     logEvent("Warning: 'GUIDE_DOC_URL' is not set. Messages will not include a link to the guide.");
   }
 
-  config.mgmtMentions = `${config.userMentions.SLACK_ID_MIKE} ${config.userMentions.SLACK_ID_JANICE}`;
+  config.mgmtMentions = `${config.userMentions.SLACK_ID_USER_A} ${config.userMentions.SLACK_ID_USER_B}`;
   return config;
 }
 
@@ -212,7 +225,7 @@ function processPayRun(payRun, adjustedPayDates, bankingDays, today, config, gui
     return;
   }
 
-  // --- Special reminders (e.g., worksheet generation for Mike) ---
+  // --- Special reminders ---
   fireSpecialReminders(payRun, payDateIndex, bankingDays, adjustedPayDate, today, config);
 
   // --- Main escalating reminders ---
@@ -230,21 +243,20 @@ function processPayRun(payRun, adjustedPayDates, bankingDays, today, config, gui
   // Build and send the main reminder
   const message = buildMainReminder(payRun, matchedTier, periodStart, periodEnd, submissionDate, adjustedPayDate, today);
   sendSlackMessage(config.slackBotToken,
-    { channel: SLACK_CHANNEL, text: message + guideFooter },
+    { channel: config.slackChannel, text: message + guideFooter },
     `${matchedTier.label} for ${payRun.description}`, config);
 
-  // On submission day, prompt management for check numbers if required
+  // On submission day, prompt for check numbers if required
   if (payRun.requiresMgmtCheckNumbers && matchedTier.isSubmissionDay) {
-    const checkNumMessage = `${config.mgmtMentions} Please post the next check numbers.`;
+    const checkNumMessage = `${config.mgmtMentions} ${config.checkNumbersMsg}`;
     sendSlackMessage(config.slackBotToken,
-      { channel: SLACK_CHANNEL, text: checkNumMessage },
+      { channel: config.slackChannel, text: checkNumMessage },
       "Check Number Request", config);
   }
 }
 
 /**
- * Fires any special one-off reminders defined on a pay run
- * (e.g., the worksheet-generation reminder for faculty payroll).
+ * Fires any special one-off reminders defined on a pay run.
  */
 function fireSpecialReminders(payRun, payDateIndex, bankingDays, adjustedPayDate, today, config) {
   if (!payRun.specialReminders) return;
@@ -260,10 +272,11 @@ function fireSpecialReminders(payRun, payDateIndex, bankingDays, adjustedPayDate
     const priorMonthName = priorMonth.toLocaleString('en-US', { month: 'long', timeZone: TIME_ZONE });
 
     const mention = config.userMentions[reminder.propertyForMention] || '';
-    const text = `${mention} ${reminder.message.replace('{priorMonthName}', priorMonthName)}`;
+    const messageTemplate = config.messages[reminder.messageProperty] || '';
+    const text = `${mention} ${messageTemplate.replace('{priorMonthName}', priorMonthName)}`;
 
     sendSlackMessage(config.slackBotToken,
-      { channel: SLACK_CHANNEL, text },
+      { channel: config.slackChannel, text },
       `Special Reminder for ${payRun.description}`, config);
   });
 }
@@ -285,7 +298,7 @@ function buildMainReminder(payRun, tier, periodStart, periodEnd, submissionDate,
     : "None";
 
   const parts = [
-    `${tier.emoji} *PAYROLL ${tier.label.toUpperCase()}*`,
+    `*PAYROLL ${tier.label.toUpperCase()}*`,
     "",
     `•  *Description*: ${payRun.description}`,
     `•  *Pay Period*: ${formatDate(periodStart, false)} – ${formatDate(periodEnd, false)}`,
@@ -339,7 +352,7 @@ function sendMonthlyPayrollSummary(config, today) {
 
   // --- Header ---
   let summaryParts = [
-    `📅 *MONTHLY PAYROLL CALENDAR — ${monthName.toUpperCase()}*`,
+    `*MONTHLY PAYROLL CALENDAR — ${monthName.toUpperCase()}*`,
     "",
     `*Banking Days:* ${bankingDays.length}`,
     ""
@@ -368,7 +381,7 @@ function sendMonthlyPayrollSummary(config, today) {
     if (!adjustedPayDate) {
       scheduleItems.push({
         sortDate: new Date(currentYear, currentMonth, payRun.day),
-        content: [`⚠️ *${payRun.description}*`, `  • ERROR: Could not determine valid pay date`]
+        content: [`*${payRun.description}*`, `  • ERROR: Could not determine valid pay date`]
       });
       return;
     }
@@ -378,7 +391,7 @@ function sendMonthlyPayrollSummary(config, today) {
     if (payDateIndex < MIN_BANKING_DAYS_REQUIRED) {
       scheduleItems.push({
         sortDate: adjustedPayDate,
-        content: [`❌ *${payRun.description}*`, `  • SKIPPED: Too few banking days before pay date`]
+        content: [`*${payRun.description}*`, `  • SKIPPED: Too few banking days before pay date`]
       });
       return;
     }
@@ -391,7 +404,7 @@ function sendMonthlyPayrollSummary(config, today) {
     REMINDER_SCHEDULE.forEach(tier => {
       const idx = payDateIndex - tier.bankingDaysBeforePay;
       if (idx >= 0) {
-        itemParts.push(`  • ${tier.emoji} ${tier.label}: ${formatDate(bankingDays[idx], true)}`);
+        itemParts.push(`  • ${tier.label}: ${formatDate(bankingDays[idx], true)}`);
       }
     });
 
@@ -422,11 +435,11 @@ function sendMonthlyPayrollSummary(config, today) {
   });
 
   if (config.guideDocUrl) {
-    summaryParts.push(`📖 <${config.guideDocUrl}|View PayrollMinder Guide>`);
+    summaryParts.push(`<${config.guideDocUrl}|View PayrollMinder Guide>`);
   }
 
   sendSlackMessage(config.slackBotToken,
-    { channel: SLACK_CHANNEL, text: summaryParts.join("\n") },
+    { channel: config.slackChannel, text: summaryParts.join("\n") },
     "Monthly Summary", config);
 
   logEvent(`Monthly summary for ${monthName} sent successfully.`);
@@ -510,8 +523,8 @@ function buildSubmissionDueLine(submissionDate, today) {
   const daysUntil = dayDifference(submissionDate, today);
   const formatted = formatDate(submissionDate, true);
 
-  if (daysUntil === 0) return `${formatted} (*Due TODAY* :warning:)`;
-  if (daysUntil === 1) return `${formatted} (_Due tomorrow_ :date:)`;
+  if (daysUntil === 0) return `${formatted} (*Due TODAY*)`;
+  if (daysUntil === 1) return `${formatted} (_Due tomorrow_)`;
   return formatted;
 }
 
@@ -650,7 +663,7 @@ function getAdjustedPayDates(bankingDays, payDates) {
  * pay-day number and the final adjusted pay date.
  *
  *   Day 10 → covers the 16th through end of the prior month
- *   Day 15 → covers the 1st through end of the prior month (faculty)
+ *   Day 15 → covers the 1st through end of the prior month
  *   Day 25 → covers the 1st through the 15th of the current month
  */
 function getPayPeriod(originalPayDateNum, finalPayDate) {
